@@ -1,0 +1,528 @@
+---
+title: "Caribou Space Use"
+format:
+  dashboard:
+    embed-resources: true
+    css: styles.css
+    nav-buttons:
+        icon: github
+        href: "https://github.com/beaconsproject/caribou_apps"
+server: shiny
+---
+
+```{r}
+#| context: setup
+library(sf)
+library(amt)
+library(bslib)
+library(leaflet)
+library(tidyverse)
+library(lubridate)
+options(shiny.maxRequestSize = 100 * 1024^2)
+
+source("R/helpers.R")
+```
+
+# Movement data {orientation="columns"}
+
+## {.sidebar .fill}
+
+**Upload data**
+
+```{r}
+actionButton("use_demo_data", "Use demo dataset", class = "btn-primary")
+br()
+fileInput("uploaded_data", "...or upload your own CSV",
+          accept = ".csv")
+hr()
+selectInput("id",     "Caribou:", choices = character(0))
+selectInput("season", "Season:",  choices = "Annual", selected = "Annual")
+sliderInput("year_range", "Years:", min = 2000, max = 2001,
+            value = c(2000, 2001), step = 1, sep = "")
+hr()
+radioButtons("map_mode", "Map view:",
+             choices  = c("Static points & tracks" = "static",
+                          "Animation"               = "animation"),
+             selected = "static")
+
+hr()
+conditionalPanel(
+  condition = "input.map_mode == 'static'",
+  sliderInput("alpha", "Opacity:",   min = 0, max = 1,  value = 0.5, step = 0.1),
+  sliderInput("size",  "Point size:", min = 0, max = 10, value = 1,   step = 1)
+)
+conditionalPanel(
+  condition = "input.map_mode == 'animation'",
+  sliderInput("animation_index", "Time Step:",
+              min = 1, max = 100, value = 1, step = 1,
+              animate = animationOptions(interval = 120, loop = FALSE,
+                                         playButton  = "Play",
+                                         pauseButton = "Pause")),
+  uiOutput("current_time_label"),
+  p(style = "font-size:0.8rem;color:#666;margin-top:4px;",
+    "Click 'Play' to animate."),
+  hr(),
+  sliderInput("line_width", "Line width:", min = 1, max = 8, value = 3, step = 1)
+)
+```
+
+## Column {width=75% .tabset}
+
+### Mapview
+
+```{r}
+leafletOutput("map", height = "100%")
+```
+
+### Movement stats
+
+```{r}
+#| title: Individuals by season
+tableOutput("individuals_by_season_table")
+```
+
+```{r}
+#| title: Sampling duration
+plotOutput("sampling_duration_plot")
+```
+
+### Help
+
+**1. Load data.** Click "Use demo dataset", or upload your own CSV, in the
+sidebar. This is the shared dataset used across the whole app — Seasonal
+ranges and Seasonal paths both work from the same data.
+
+**2. Filter the map.** Choose a **Caribou**, **Season**, and **Years**
+range from the sidebar; these apply only to the **Mapview** tab and the
+"Summary stats" card. The **Movement stats** tab (table and plot) always
+summarizes every individual and year in the loaded dataset, regardless of
+these filters, so you can see the full picture at a glance.
+
+**3. Pick a map view:**
+
+- **Static points & tracks** — plots the filtered relocations as points and
+  connects them into tracks. Use the Opacity and Point size sliders to
+  adjust how they're drawn.
+- **Animation** — replays the selected individual's movement over time.
+  Use "Play"/"Pause" or drag the Time Step slider to scrub through it, and
+  Line width to adjust the trail. Every individual's starting location is
+  also shown for context.
+
+**4. Read the results:**
+
+- **Mapview** — GPS points, tracks, and the population boundary (static
+  mode), or the animated path and starting locations (animation mode).
+  Toggle any layer on/off from the layer control in the map's top-right
+  corner.
+- **Movement stats** — a table of how many individuals were tracked in
+  each season/phase by year, and a plot of each individual's sampling
+  duration (first to last relocation, by year).
+- The right-hand column shows **Summary stats** (season, years, date
+  range, and relocation count for the current filter) in static mode, or
+  **Animation details** (the current playback position and a map legend)
+  in animation mode.
+
+```{r}
+#| context: server
+source("R/server_movement.R", local = TRUE)
+```
+
+## Column {width=25%}
+
+```{r}
+div(
+  class = "h-100",
+  conditionalPanel(
+    condition = "input.map_mode == 'static'",
+    class = "h-100",
+    card(class = "h-100", card_header("Summary stats"), uiOutput("summary_stats"))
+  ),
+  conditionalPanel(
+    condition = "input.map_mode == 'animation'",
+    class = "h-100",
+    card(class = "h-100", card_header("Animation details"), uiOutput("animation_details"))
+  )
+)
+```
+
+
+
+# Seasonal ranges {orientation="columns"}
+
+## {.sidebar .fill}
+
+**Select method**
+
+```{r}
+selectInput("id3", "Caribou:", choices = character(0))
+selectInput("phase3", "Season:", choices = "Annual", selected = "Annual")
+conditionalPanel(
+  condition = "input.phase3 == 'Annual'",
+  checkboxInput("include_migration3", "Include migration periods?", value = FALSE),
+  p(style = "font-size:0.8rem;color:#666;margin-top:-8px;",
+    "When checked, migration-period relocations are estimated separately ",
+    "with a Brownian bridge (BBMM) and combined into the annual range; ",
+    "when unchecked, they're excluded from the estimate.")
+)
+sliderInput("year_range3", "Years:", min = 2000, max = 2001,
+            value = c(2000, 2001), step = 1, sep = "")
+hr()
+radioButtons("hr_method3", "Estimator:",
+             choices  = c("MCP" = "MCP", "KDE" = "KDE", "aKDE" = "aKDE"),
+             selected = "KDE")
+sliderInput("levels3", "Isopleth level:", min = 0.5, max = 0.99, value = 0.95, step = 0.01)
+conditionalPanel(
+  condition = "input.hr_method3 == 'KDE'",
+  sliderInput("h3", "KDE bandwidth multiplier:", min = 0, max = 1, value = 0, step = 0.05),
+  p(style = "font-size:0.8rem;color:#666;margin-top:-8px;",
+    "0 = automatic reference bandwidth; otherwise scales it.")
+)
+conditionalPanel(
+  condition = "input.hr_method3 == 'aKDE'",
+  selectInput("ctmm_model3", "Movement model:",
+              choices = c("Brownian motion (BM)"        = "bm",
+                          "Ornstein-Uhlenbeck (OU)"      = "ou",
+                          "OU + velocity (OUF)"          = "ouf",
+                          "Independent (IID)"            = "iid",
+                          "Auto-select (AICc)"           = "auto"),
+              selected = "iid"),
+  p(style = "font-size:0.8rem;color:#666;margin-top:-8px;",
+    "Autocorrelated KDE via Kriging of the fitted movement model. IID ",
+    "matches classic KDE; OU/OUF account for autocorrelated movement; ",
+    "Auto-select can be slow.")
+)
+hr()
+actionButton("estimate_range3", "Estimate range", class = "btn-primary", width = "100%")
+```
+
+## Column {width=65% .tabset}
+
+### Mapview
+
+```{r}
+leafletOutput("map3", height = "100%")
+```
+
+### Population plots
+
+```{r}
+plotOutput("range_by_id_plot3", height = "100%")
+```
+
+### Methods
+
+An individual's seasonal or annual range is estimated from its GPS
+relocations (filtered by the sidebar's Caribou, Season, and Years) using
+one of three estimators:
+
+- **MCP (Minimum Convex Polygon)** — the smallest convex polygon enclosing
+  the selected percentage of relocations. Simple and fast, but sensitive to
+  outliers and tends to overestimate range in irregularly-shaped areas.
+- **KDE (Kernel Density Estimation)** — a smoothed utilization distribution
+  built from a kernel placed at each relocation. Bandwidth defaults to
+  `amt`'s automatic reference bandwidth; the "KDE bandwidth multiplier"
+  slider scales it up or down.
+- **aKDE (autocorrelated KDE)** — fits a continuous-time movement model
+  (IID, OU, OUF, or AICc auto-selected, via the `ctmm` package) and
+  estimates the range from a Kriged occurrence distribution. Unlike plain
+  KDE, this accounts for the temporal autocorrelation inherent in regularly
+  sampled GPS fixes, and is the more statistically appropriate choice when
+  fixes are closely spaced in time.
+
+All three produce a boundary at the selected **isopleth level** (default
+95%) — the smallest area estimated to contain that percentage of the
+animal's space use.
+
+**Multiple years.** When the Years slider spans more than one year, each
+year is estimated independently and the resulting polygons are combined
+with a spatial union into that individual's overall range. This is why the
+"Estimated areas" table shows one row per year plus a "Total" row, and why
+the map/plots can show a separate dashed contour per year.
+
+**Migration periods (Annual only).** Movement during migration is fast and
+directional, not the stationary space-use that MCP/KDE/aKDE assume — so
+when Season is "Annual", the **"Include migration periods?"** checkbox
+controls how those relocations are handled:
+
+- **Checked (default)** — migration-period relocations are estimated
+  separately with a **BBMM (Brownian Bridge Movement Model)** — the same
+  Kriged-occurrence machinery as the Seasonal paths page's Kriging method,
+  fit with a Brownian-motion movement model — and the result is combined
+  with a spatial union into the annual range alongside the selected
+  estimator's result for the rest of the year. The migration-only polygon
+  is also drawn on its own as the **Migration corridor** map layer, so you
+  can see exactly which part of the annual range comes from migratory
+  movement versus stationary space use.
+- **Unchecked** — migration-period relocations are excluded entirely, so
+  the annual range reflects only non-migratory space use, and no Migration
+  corridor layer is drawn.
+
+Either way, the "Estimated areas" table's **N** column always reflects
+exactly how many relocations contributed to that row's area.
+
+**Population level ("ALL").** Selecting "ALL" for Caribou repeats the same
+per-individual (and per-year) estimation for every caribou in the current
+filter, then combines the resulting individual ranges with a spatial union
+into a single population-level range. Because a model is fit separately
+for every individual (and year), this can take noticeably longer than a
+single-individual estimate — especially with aKDE, and most of all with
+the "Auto-select (AICc)" movement model.
+
+### Help
+
+**1. Load data.** Data is shared across the whole app — use the "Use demo
+dataset" button or upload your own CSV on the **Movement data** page first.
+
+**2. Set the filters.** In this page's sidebar, choose:
+
+- **Caribou** — an individual, or "ALL" to estimate a population-level range.
+- **Season** — "Annual" (no filter) or a specific season. Choosing "Annual"
+  reveals the **"Include migration periods?"** checkbox (see the *Methods*
+  tab) — checked by default, so migration-period relocations are folded
+  into the annual range via a BBMM estimate; uncheck it to exclude them.
+- **Years** — the year range to include.
+
+**3. Choose an estimator.** Pick MCP, KDE, or aKDE (see the *Methods* tab
+for what each one does). KDE and aKDE reveal extra options — a bandwidth
+slider and a movement-model choice, respectively — only when selected.
+
+**4. Set the isopleth level** (default 95%) with the slider.
+
+**5. Click "Estimate range".** The estimate isn't recomputed automatically
+as you change filters — press the button whenever you want to refresh it.
+Estimating for "ALL", with aKDE, or with migration periods included, can
+take a while; a notification appears while it's running.
+
+**6. Read the results:**
+
+- **Mapview** — the estimated range, plus GPS points, tracks, the
+  population boundary, (when Season is "Annual" with migration periods
+  included) an orange **Migration corridor** layer showing the
+  migration-only portion of the range, and (when more than one year was
+  estimated) a dashed contour per year. Toggle any of these on/off from
+  the layer control in the map's top-right corner.
+- **Population plots** — one panel per caribou, only shown when "ALL" is
+  selected, for comparing individual ranges side by side at the same
+  spatial extent.
+- **Summary stats** / **Estimated areas** (right column) — a quick summary
+  of the current selection, and a table of areas (km²) with one row per
+  year plus totals.
+
+## Column {width=35%}
+
+<!-- The .tabset on the sibling 75% column shifts Quarto's row/column
+     alternation for everything after it, so without this extra heading
+     level the two cards below render side-by-side instead of stacked. -->
+### Details Panel
+
+#### Row - stats {height="35%"}
+
+```{r}
+#| title: Summary stats
+tableOutput("summary_stats3")
+```
+
+#### Row - areas {height="65%"}
+
+```{r}
+#| title: Estimated areas
+tableOutput("area_by_level3")
+```
+
+```{r}
+#| context: server
+source("R/server_ranges.R", local = TRUE)
+```
+
+# Seasonal paths {orientation="columns"}
+
+## {.sidebar}
+
+**Select method**
+
+```{r}
+selectInput("id4", "Caribou:", choices = character(0))
+selectInput("phase4", "Migration:", choices = character(0))
+sliderInput("year_range4", "Years:", min = 2000, max = 2001,
+            value = c(2000, 2001), step = 1, sep = "")
+hr()
+radioButtons("method4", "Corridor method:",
+             choices  = c("Line buffer", "Kriging (CTMM)", "Mixed approach"),
+             selected = "Line buffer")
+conditionalPanel(
+  condition = "input.method4 == 'Line buffer' || input.method4 == 'Mixed approach'",
+  sliderInput("buffer4", "Corridor buffer (m):", min = 100, max = 5000,
+              value = 500, step = 100)
+)
+conditionalPanel(
+  condition = "input.method4 == 'Kriging (CTMM)' || input.method4 == 'Mixed approach'",
+  selectInput("ctmm_model4", "Movement model:",
+              choices = c("Brownian motion (BM)"        = "bm",
+                          "Ornstein-Uhlenbeck (OU)"      = "ou",
+                          "OU + velocity (OUF)"          = "ouf",
+                          "Auto-select (AICc)"           = "auto"),
+              selected = "bm"),
+  p(style = "font-size:0.8rem;color:#666;margin-top:-8px;",
+    "Occurrence distribution estimated via continuous-time (Kriging) ",
+    "interpolation of the fitted movement model. BM is the classic ",
+    "Brownian bridge; OU/OUF account for autocorrelated movement; ",
+    "Auto-select can be slow."),
+  sliderInput("footprint_level4", "Corridor footprint level:",
+              min = 0.5, max = 0.99, value = 0.99, step = 0.01),
+  sliderInput("grid_res4", "Grid resolution (m):",
+              min = 50, max = 500, value = 200, step = 25),
+  p(style = "font-size:0.8rem;color:#666;margin-top:-8px;",
+    "A finer (smaller) grid resolution is more precise but noticeably ",
+    "slower, especially for \"ALL\" individuals."),
+  conditionalPanel(
+    condition = "input.id4 == 'ALL'",
+    sliderInput("tier_moderate4", "\"Moderate use\" tier (% of population):",
+                min = 5, max = 95, value = 25, step = 5),
+    sliderInput("tier_high4", "\"High use\" tier (% of population):",
+                min = 5, max = 95, value = 50, step = 5),
+    p(style = "font-size:0.8rem;color:#666;margin-top:-8px;",
+      "Population-level usage tiers (see the Methods tab) — only used ",
+      "when \"ALL\" is selected for Caribou.")
+  )
+)
+hr()
+actionButton("estimate_path4", "Identify corridor", class = "btn-primary", width = "100%")
+```
+
+## Column {width=65% .tabset}
+
+### Mapview
+
+```{r}
+leafletOutput("map4", height = "100%")
+```
+
+### Population plots
+
+```{r}
+plotOutput("corridor_by_id_plot4", height = "100%")
+```
+
+### Methods
+
+An individual's seasonal migration corridor is identified from its GPS
+relocations (filtered by the sidebar's Caribou, Migration, and Years)
+using one of three methods:
+
+- **Line buffer** — connects the ordered relocations for each individual
+  x year into a track, buffers it by the "Corridor buffer" distance, and
+  unions the buffered segments into a single polygon. Simple and fast,
+  and follows the travelled path directly. When more than one year is
+  selected, each year is buffered independently and the results are
+  unioned into that individual's overall corridor — one row per year plus
+  a "Total" row in the "Estimated areas" table, and a separate dashed
+  contour per year on the map.
+- **Kriging (CTMM)** — follows the Brownian-bridge population-corridor
+  workflow used by Sawyer et al. (2009), the Wyoming Migration Initiative's
+  Migration Mapper, and similar studies:
+    1. A continuous-time movement model (Brownian motion, OU, OUF, or
+       AICc auto-selected, via the `ctmm` package) is fit separately for
+       each individual x year, and a Kriged occurrence-distribution
+       surface is estimated from it on one shared spatial grid covering
+       the full current selection, so every individual/year is directly
+       comparable. Gaps of 8 hours or more between fixes are excluded from
+       the bridging.
+    2. Each year's surface is rescaled to sum to 1 (a proper probability
+       surface), independent of relocation count or migration duration.
+    3. An individual's rescaled yearly surfaces are averaged together and
+       rescaled again, so an individual tracked over many years doesn't
+       dominate the signal — one averaged surface per individual rather
+       than a separate estimate per year (the "Estimated areas" table
+       shows one row spanning the year range for a multi-year individual,
+       and no per-year map contour, since the years are no longer kept
+       separate at this point).
+    4. That individual's migration-route footprint is extracted as the
+       99% isopleth of their averaged surface.
+  - For a single caribou, this footprint *is* the corridor. For "ALL",
+    Steps 5-6 continue: each individual's footprint is rasterized to the
+    shared grid and the population's footprints are stacked, counting how
+    many individuals cover each pixel; the stacked count is then
+    classified into three usage tiers — *any use* (>=1 individual),
+    *>=25% of the population*, and *>=50% of the population* — each drawn
+    as its own toggleable map layer and table row. With few individuals in
+    the current selection, 25% may round down to the same "at least one"
+    threshold as *any use*, so the Low and Moderate tiers can coincide.
+- **Mixed approach** — the spatial union of the Line buffer corridor and
+  the Kriging workflow's *any use* footprint, combining both perspectives
+  into one polygon (per individual, and again across individuals for
+  "ALL"). The population usage tiers above only apply to the Kriging
+  method on its own.
+
+**Population level ("ALL").** Selecting "ALL" for Caribou repeats the
+per-individual corridor identification for every caribou in the current
+filter, then combines the individual corridors as described above. A
+model is fit separately for every individual (and, for Line buffer/Mixed,
+every year) with Kriging/Mixed, so this can take noticeably longer than a
+single-individual estimate — especially with the "Auto-select (AICc)"
+movement model.
+
+### Help
+
+**1. Load data.** Data is shared across the whole app — use the "Use demo
+dataset" button or upload your own CSV on the **Movement data** page first.
+
+**2. Set the filters.** In this page's sidebar, choose:
+
+- **Caribou** — an individual, or "ALL" to identify a population-level
+  corridor.
+- **Migration** — the migration period to include (only migration-period
+  relocations are used, since corridors describe movement between ranges).
+- **Years** — the year range to include.
+
+**3. Choose a corridor method.** Pick Line buffer, Kriging (CTMM), or
+Mixed approach (see the *Methods* tab for what each one does). Line buffer
+reveals a buffer-distance slider; Kriging and Mixed reveal a movement-model
+choice — only when relevant.
+
+**4. Click "Identify corridor".** The corridor isn't recomputed
+automatically as you change filters — press the button whenever you want
+to refresh it. Estimating for "ALL" or with Kriging can take a while; a
+notification appears while it's running.
+
+**5. Read the results:**
+
+- **Mapview** — the identified corridor, plus GPS points, tracks, the
+  population boundary, and (when more than one year was estimated with
+  Line buffer or Mixed) a dashed contour per year. With Kriging and "ALL"
+  selected, the corridor is shown as three separate usage-tier layers
+  ("any use" through ">=50% of population") instead of a single fill.
+  Toggle any of these on/off from the layer control in the map's top-right
+  corner.
+- **Population plots** — one panel per caribou, only shown when "ALL" is
+  selected, for comparing individual corridors side by side at the same
+  spatial extent.
+- **Summary stats** / **Estimated areas** (right column) — a quick summary
+  of the current selection, and a table of areas (km²) with one row per
+  year (Line buffer/Mixed) or per multi-year average (Kriging), plus
+  totals and, for Kriging with "ALL", one row per usage tier.
+
+## Column {width=35%}
+
+<!-- The .tabset on the sibling 75% column shifts Quarto's row/column
+     alternation for everything after it, so without this extra heading
+     level the two cards below render side-by-side instead of stacked. -->
+### Details Panel
+
+#### Row - stats {height="35%"}
+
+```{r}
+#| title: Summary stats
+tableOutput("summary_stats4")
+```
+
+#### Row - areas {height="65%"}
+
+```{r}
+#| title: Estimated areas
+tableOutput("area_by_level4")
+```
+
+```{r}
+#| context: server
+source("R/server_paths.R", local = TRUE)
+```

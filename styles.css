@@ -1,0 +1,10 @@
+/* showNotification()'s messages ("... this could take a while") default to
+   Shiny's bottom-right corner, easy to miss on a busy map page — center
+   them instead so a long-running estimate is impossible to overlook. */
+#shiny-notification-panel {
+  top: 50% !important;
+  left: 50% !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: translate(-50%, -50%);
+}
