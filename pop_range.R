@@ -14,7 +14,9 @@ library(tmap)
 #-------------------------------------------------------------------------------
 # USER INFORMATION
 
-herd <- "little_rancheria"
+#herd <- "little_rancheria"
+#herd <- "horseranch"
+herd <- "wolf_lake"
 gps_csv <- paste0("../../data/", herd, "/caribou.csv")
 #outdir <- paste0("../../data/", herd, "/ranges/")
 outdir <- paste0("output/", herd, "/")
@@ -25,7 +27,7 @@ if (!dir.exists(map_dir)) dir.create(map_dir)
 min_n <- 30      # minimum fixes per animal-period (per year, for yearly ranges)
 res_m <- 500     # grid resolution (m) shared by all UDs
 levels <- c(0.95, 0.99, 0.999, 0.9999)
-make_maps <- TRUE
+make_maps <- FALSE
 
 #-------------------------------------------------------------------------------
 # PREPARE DATA
@@ -177,6 +179,7 @@ pop_ranges |>
 # GPS fixes as CSV with longitude/latitude (WGS84)
 gps_file <- paste0(outdir, "gps.csv")
 gps_sf <- st_read(paste0("../../data/", herd, "/caribou.gpkg"), "gps", quiet=TRUE)
+st_geometry(gps_sf) <- "geometry"
 gps_sf |>
   st_transform(4326) |>
   select(-any_of(c("longitude", "latitude"))) |>
@@ -191,10 +194,10 @@ gps_sf |>
 #if (!dir.exists(app_dir)) dir.create(app_dir, recursive=TRUE)
 #file.copy(c(ranges_file, gps_file), app_dir, overwrite=TRUE)
 
-for (y in names(res)) {
-  fname <- paste0(outdir, "annual_ud_", gsub("[^A-Za-z0-9]+", "_", tolower(y)), ".tif")
-  writeRaster(res[[y]]$annual_ud, fname, overwrite=TRUE)
-}
+#for (y in names(res)) {
+#  fname <- paste0(outdir, "annual_ud_", gsub("[^A-Za-z0-9]+", "_", tolower(y)), ".tif")
+#  writeRaster(res[[y]]$annual_ud, fname, overwrite=TRUE)
+#}
 
 pop_ranges |>
   st_drop_geometry() |>

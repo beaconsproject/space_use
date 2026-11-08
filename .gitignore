@@ -1,2 +1,5 @@
 corridor_workflow.md
 issues.md
+
+/.quarto/
+**/*.quarto_ipynb
