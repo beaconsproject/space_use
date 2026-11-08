@@ -1,0 +1,606 @@
+---
+title: "LFN Caribou Herds: Population Ranges"
+format:
+  dashboard:
+    css: styles.css
+---
+
+## {.sidebar}
+
+```{ojs}
+viewof herd = Inputs.select(herdChoices, {label: "Herd:", value: "little_rancheria"})
+```
+
+```{ojs}
+viewof prYear = Inputs.select(yearChoices, {label: "Year:", value: ALL_YEARS})
+```
+
+```{ojs}
+viewof prPeriod = Inputs.select(periodChoices, {label: "Period:", value: ANNUAL})
+```
+
+```{ojs}
+viewof prLevels = Inputs.checkbox(LEVEL_LABELS, {label: "Isopleth levels:", value: LEVEL_LABELS})
+```
+
+---
+
+```{ojs}
+viewof alpha = Inputs.range([0, 1], {label: "Opacity:", step: 0.1, value: 0.3})
+```
+
+```{ojs}
+viewof size = Inputs.range([1, 10], {label: "Point size:", step: 1, value: 2})
+```
+
+---
+
+```{ojs}
+viewof cmpLevel = Inputs.select(LEVEL_LABELS, {label: "Comparison level:", value: "95%"})
+```
+
+---
+
+::: {.legend-text}
+**Legend:**
+
+Boundary: Seasonal union of all ranges at the 99.99% level, all years combined.
+
+Annual (weighted): Population range estimated as a time-weighted mixture of seasonal and migration-period UDs, with equal weight per animal.
+
+Seasonal union: Union of the seasonal and migration-period ranges (an extent, not a UD).
+
+GPS: Relocations for the selected year and period.
+
+Comparison level: Isopleth level used in the "Compare periods" plots.
+:::
+
+```{ojs}
+//| output: false
+
+// ============================================================================
+// Setup
+// ============================================================================
+
+herdChoices = new Map([
+  ["Little Rancheria", "little_rancheria"],
+  ["Wolf Lake",        "wolf_lake"],
+  ["Horse Ranch",      "horseranch"]
+])
+
+// Literal paths so Quarto can see and copy the files
+// (outputs of pop_range.R: output/<herd>/pop_ranges.geojson and gps.csv)
+herdFiles = new Map([
+  ["little_rancheria", [FileAttachment("output/little_rancheria/pop_ranges.geojson"),
+                        FileAttachment("output/little_rancheria/gps.csv")]],
+  ["wolf_lake",        [FileAttachment("output/wolf_lake/pop_ranges.geojson"),
+                        FileAttachment("output/wolf_lake/gps.csv")]],
+  ["horseranch",       [FileAttachment("output/horseranch/pop_ranges.geojson"),
+                        FileAttachment("output/horseranch/gps.csv")]]
+])
+
+ALL_YEARS = "All years"
+ANNUAL = "Annual (weighted)"
+UNION = "Seasonal union"
+
+// Isopleth labels and colours (same as the PNG maps from pop_range.R)
+LEVEL_LAB = new Map([["0.95", "95%"], ["0.99", "99%"], ["0.999", "99.9%"], ["0.9999", "99.99%"]])
+LEVEL_LABELS = [...LEVEL_LAB.values()]
+LEVEL_COL = new Map([["95%", "#b2182b"], ["99%", "#ef8a62"], ["99.9%", "#2166ac"], ["99.99%", "#542788"]])
+
+// Coordinates in metres (NAD83 / Yukon Albers, EPSG:3578) are converted to
+// longitude/latitude, so files written without st_transform(4326) still work
+proj4 = require("proj4@2.9.0")
+YUKON_ALBERS = "+proj=aea +lat_0=59 +lon_0=-132.5 +lat_1=61.6666666666667 +lat_2=68 " +
+               "+x_0=500000 +y_0=500000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+toLonLat = proj4(YUKON_ALBERS, "EPSG:4326")
+isProjected = (x, y) => Math.abs(x) > 180 || Math.abs(y) > 90
+
+function firstCoord(c) {
+  while (Array.isArray(c) && Array.isArray(c[0])) c = c[0];
+  return c;
+}
+
+function reprojectGeometry(g) {
+  if (!g) return g;
+  if (g.type === "GeometryCollection") { g.geometries.forEach(reprojectGeometry); return g; }
+  const walk = c => typeof c[0] === "number" ? toLonLat.forward([c[0], c[1]]) : c.map(walk);
+  g.coordinates = walk(g.coordinates);
+  return g;
+}
+
+// "YYYY-MM-DD HH:MM:SS" (no time zone) is read as UTC
+function parseTime(s) {
+  if (s instanceof Date) return s;
+  if (s == null || s === "") return null;
+  const t = String(s).trim().replace(" ", "T");
+  const d = new Date(/(Z|[+-]\d{2}:?\d{2})$/.test(t) ? t : t + "Z");
+  return isNaN(d) ? null : d;
+}
+
+// Each herd is downloaded at most once
+loadHerd = {
+  const cache = new Map();
+  return code => {
+    if (!cache.has(code)) {
+      const [rangesF, gpsF] = herdFiles.get(code);
+      cache.set(code, Promise.all([rangesF.json(), gpsF.csv({typed: true})])
+        .then(([ranges, gps]) => {
+          // Reproject ranges if they were written in metres
+          const g0 = ranges.features.find(f => f.geometry)?.geometry;
+          const c0 = g0 ? firstCoord(g0.coordinates ?? g0.geometries?.[0]?.coordinates) : null;
+          if (c0 && isProjected(c0[0], c0[1])) {
+            console.warn(`${code}: ranges are in projected coordinates; converting from EPSG:3578`);
+            ranges.features.forEach(f => reprojectGeometry(f.geometry));
+            delete ranges.crs;
+          }
+          // GPS coordinates: longitude/latitude, else x/y columns; reproject if in metres
+          for (const r of gps) {
+            if (r.longitude == null && r.x != null) { r.longitude = r.x; r.latitude = r.y; }
+            if (r.longitude != null && r.latitude != null && isProjected(+r.longitude, +r.latitude)) {
+              [r.longitude, r.latitude] = toLonLat.forward([+r.longitude, +r.latitude]);
+            }
+          }
+          for (const f of ranges.features) {
+            const p = f.properties;
+            p.year = String(p.year);
+            p.level = String(+p.level);
+            p.isopleth = LEVEL_LAB.get(p.level) ?? p.level;
+            p.area_km2 = p.area_km2 == null ? null : +p.area_km2;
+            p.weight = p.weight == null ? null : +p.weight;
+            p.n_ids = p.n_ids == null ? null : +p.n_ids;
+          }
+          for (const r of gps) {
+            r.year = r.year == null ? "" : String(r.year);
+            // season is blank during migration: use the migration label instead
+            const s = (r.season == null || r.season === "") ? r.migration : r.season;
+            r.season = s == null ? "" : String(s);
+            r.timestamp = parseTime(r.timestamp);
+          }
+          const rows = ranges.features.map(f => f.properties);
+          const union = ranges.features.filter(f =>
+            f.properties.year === ALL_YEARS && f.properties.season === UNION);
+          const maxLevel = d3.max(union, f => +f.properties.level);
+          const bnd = {type: "FeatureCollection",
+                       features: union.filter(f => +f.properties.level === maxLevel)};
+          return {ok: true, ranges, rangeRows: rows, gps, bnd};
+        })
+        .catch(() => ({ok: false, error: `No population range data found for ${code}.`,
+                       ranges: {type: "FeatureCollection", features: []},
+                       rangeRows: [], gps: [], bnd: null})));
+    }
+    return cache.get(code);
+  };
+}
+
+naturalSort = (a, b) => String(a).localeCompare(String(b), undefined, {numeric: true})
+fmtDate = d3.utcFormat("%Y-%m-%d")
+fmtArea = d3.format(",.1f")
+fmtInt = d3.format(",")
+
+function emptyMsg(msg) {
+  return html`<div class="empty-msg">${msg}</div>`;
+}
+
+// ggplot2's default discrete palette: scales::hue_pal() = hcl(h, c = 100, l = 65)
+// in polar CIE-Luv, converted to sRGB exactly as grDevices::hcl() does
+function polarLuvHex(h, c, l) {
+  const Xn = 95.047, Yn = 100, Zn = 108.883;
+  const hr = h * Math.PI / 180, u = c * Math.cos(hr), v = c * Math.sin(hr);
+  const Y = l > 8 ? Yn * Math.pow((l + 16) / 116, 3) : Yn * l / 903.3;
+  const den = Xn + 15 * Yn + 3 * Zn, un = 4 * Xn / den, vn = 9 * Yn / den;
+  const up = u / (13 * l) + un, vp = v / (13 * l) + vn;
+  const X = Y * 9 * up / (4 * vp), Z = Y * (12 - 3 * up - 20 * vp) / (4 * vp);
+  const lin = [ 3.240479 * X - 1.537150 * Y - 0.498535 * Z,
+               -0.969256 * X + 1.875992 * Y + 0.041556 * Z,
+                0.055648 * X - 0.204043 * Y + 1.057311 * Z].map(t => t / 100);
+  const gam = t => t <= 0.0031308 ? 12.92 * t : 1.055 * Math.pow(t, 1 / 2.4) - 0.055;
+  return "#" + lin.map(t => Math.round(255 * Math.min(1, Math.max(0, gam(t))))
+    .toString(16).padStart(2, "0")).join("");
+}
+
+huePal = n => d3.range(n).map(i => polarLuvHex(15 + 360 * i / n, 100, 65))
+
+esriUrl = name => `https://server.arcgisonline.com/ArcGIS/rest/services/${name}/MapServer/tile/{z}/{y}/{x}`
+
+function esriLayers(names) {
+  const services = {
+    topo:  ["World_Topo_Map", 19],
+    image: ["World_Imagery", 19],
+    gray:  ["Canvas/World_Light_Gray_Base", 16]
+  };
+  const out = {};
+  for (const [label, key] of names) {
+    const [service, maxZoom] = services[key];
+    out[label] = L.tileLayer(esriUrl(service), {attribution: "Tiles &copy; Esri", maxZoom});
+  }
+  return out;
+}
+
+// Keep a Leaflet map sized to its card (also fixes maps on tabs that start hidden)
+function watchMapSize(container, map, onFirstShow, invalidation) {
+  let first = true;
+  const ro = new ResizeObserver(() => {
+    if (!container.clientWidth || !container.clientHeight) return;
+    map.invalidateSize();
+    if (first) { first = false; onFirstShow(); }
+  });
+  ro.observe(container);
+  invalidation.then(() => { ro.disconnect(); map.remove(); });
+}
+
+// Fit an Observable Plot to its dashboard card and redraw on resize
+function fitToCard(render, invalidation) {
+  const div = html`<div class="fit-card"></div>`;
+  let last = "";
+  const draw = () => {
+    const w = Math.floor(div.clientWidth);
+    const h = Math.floor(div.clientHeight);
+    if (w < 50 || h < 50) return;
+    const key = w + "x" + h;
+    if (key === last) return;
+    last = key;
+    div.replaceChildren(render(w, h));
+  };
+  const ro = new ResizeObserver(draw);
+  ro.observe(div);
+  invalidation.then(() => ro.disconnect());
+  return div;
+}
+
+// Colour scale for range type (annual / migration / season / union)
+typeColor = types => {
+  const domain = [...new Set(types)].sort();
+  return {domain, range: huePal(domain.length), label: "type"};
+}
+
+// ============================================================================
+// Data and filters
+// ============================================================================
+
+herdData = loadHerd(herd)
+
+herdLabel = [...herdChoices].find(([, v]) => v === herd)[0]
+
+yearChoices = [ALL_YEARS,
+               ...[...new Set(herdData.rangeRows.map(r => r.year))]
+                  .filter(y => y !== ALL_YEARS).sort(naturalSort)]
+
+// Periods in the order they were written (annual first, union last)
+periodChoices = [ANNUAL,
+                 ...[...new Set(herdData.rangeRows.map(r => r.season))]
+                    .filter(s => s !== ANNUAL && s !== UNION),
+                 UNION]
+
+// Ranges on the map: selected year, period and levels; outer contours first
+range1 = herdData.ranges.features
+  .filter(f => f.properties.year === prYear && f.properties.season === prPeriod &&
+               prLevels.includes(f.properties.isopleth))
+  .sort((a, b) => +b.properties.level - +a.properties.level)
+
+// All levels for the selected year and period (summary and table)
+rangeSubset = herdData.rangeRows
+  .filter(r => r.year === prYear && r.season === prPeriod)
+  .sort((a, b) => +a.level - +b.level)
+
+gps1 = herdData.gps.filter(r =>
+  (prYear === ALL_YEARS || r.year === prYear) &&
+  (prPeriod === ANNUAL || prPeriod === UNION || r.season === prPeriod))
+
+// ============================================================================
+// Map
+// ============================================================================
+
+rangeMap = {
+  // Inline position: Leaflet can't see the stylesheet before the div is on the
+  // page, and would otherwise force position:relative (giving a 0-height map)
+  const container = html`<div class="map-fill" style="position:absolute;inset:0;"></div>`;
+  const map = L.map(container, {preferCanvas: true, attributionControl: false});
+  const base = esriLayers([["Esri.WorldTopoMap", "topo"], ["Esri.WorldImagery", "image"],
+                           ["Esri.WorldGrayCanvas", "gray"]]);
+  base["Esri.WorldTopoMap"].addTo(map);
+  map.setView([60.5, -130], 6);
+  map.createPane("ranges").style.zIndex = 410;
+  map.createPane("gps").style.zIndex = 420;
+  const boundary = L.geoJSON(herdData.bnd ?? {type: "FeatureCollection", features: []},
+                             {style: {color: "black", weight: 2, fill: false}}).addTo(map);
+  const ranges = L.layerGroup().addTo(map);
+  const gps = L.layerGroup();                          // hidden by default
+  L.control.layers(base, {Boundary: boundary, Ranges: ranges, GPS: gps},
+                   {position: "topright", collapsed: false}).addTo(map);
+  const legend = L.control({position: "bottomright"});
+  legend.onAdd = () => L.DomUtil.create("div", "range-legend");
+  legend.addTo(map);
+  const fit = () => {
+    let b = boundary.getBounds();
+    if (!b.isValid()) b = L.geoJSON(herdData.ranges).getBounds();
+    if (b.isValid()) map.fitBounds(b);
+  };
+  watchMapSize(container, map, fit, invalidation);
+  return {container, map, ranges, gps, legend};
+}
+
+rangeLayersUpdate = {
+  const {ranges, gps, legend} = rangeMap;
+  ranges.clearLayers();
+  gps.clearLayers();
+  L.geoJSON({type: "FeatureCollection", features: range1}, {
+    pane: "ranges",
+    style: f => {
+      const c = LEVEL_COL.get(f.properties.isopleth);
+      return {color: c, weight: 2, opacity: 1, fillColor: c, fillOpacity: alpha};
+    }
+  }).bindTooltip(l => `${l.feature.properties.isopleth}: ${fmtArea(l.feature.properties.area_km2)} km²`,
+                 {sticky: true})
+    .addTo(ranges);
+  for (const p of gps1) {
+    if (p.latitude == null || p.longitude == null) continue;
+    L.circleMarker([p.latitude, p.longitude], {
+      pane: "gps", radius: size, stroke: false, fillColor: "black", fillOpacity: 0.5
+    }).addTo(gps);
+  }
+  const shown = LEVEL_LABELS.filter(l => range1.some(f => f.properties.isopleth === l));
+  legend.getContainer().innerHTML = shown.length
+    ? `<div class="lg-title">Isopleth</div>` +
+      shown.map(l => `<div><i style="background:${LEVEL_COL.get(l)}"></i>${l}</div>`).join("")
+    : "";
+  legend.getContainer().style.display = shown.length ? "" : "none";
+  return range1.length;
+}
+
+// ============================================================================
+// Side panels
+// ============================================================================
+
+function summaryText(data, rows, x, herdName, year, period) {
+  if (!data.ok) return emptyMsg(data.error);
+  if (!rows.length) return emptyMsg("No ranges for this selection.");
+  const r = rows[0];
+  const lines = [`Herd: ${herdName}`, `Year: ${year}`, `Period: ${period}`];
+  if (period !== ANNUAL && period !== UNION) {
+    lines.push(`Type: ${r.type}`, `Weight in annual range: ${r.weight}`);
+  }
+  if (r.n_ids != null) lines.push(`Animals: ${r.n_ids}`);
+  const ts = x.map(d => d.timestamp).filter(d => d instanceof Date);
+  if (ts.length) {
+    const [t0, t1] = d3.extent(ts);
+    lines.push(`Start date: ${fmtDate(t0)}`, `End date: ${fmtDate(t1)}`);
+  }
+  lines.push(`Relocations: ${fmtInt(x.length)}`);
+  return html`<pre class="summary">${lines.join("\n")}</pre>`;
+}
+
+function rangeTable(rows) {
+  if (!rows.length) return emptyMsg("No ranges for this selection.");
+  return html`<table class="table table-sm table-striped range-table">
+    <thead><tr><th>Level</th><th class="num">Area (km²)</th></tr></thead>
+    <tbody>${rows.map(r => html`<tr><td>${r.isopleth}</td>
+      <td class="num">${r.area_km2 == null ? "" : fmtArea(r.area_km2)}</td></tr>`)}</tbody>
+  </table>`;
+}
+
+// Area by year for one period, one line per isopleth; dashed = all years
+function areaTimePlot(rows, allRows, period, w, h) {
+  if (!rows.length) return emptyMsg("No yearly ranges for this selection.");
+  const years = [...new Set(rows.map(r => r.year))].sort(naturalSort);
+  const shown = LEVEL_LABELS.filter(l => rows.some(r => r.isopleth === l));
+  const sorted = d3.sort(rows, r => years.indexOf(r.year));
+  const color = {domain: shown, range: shown.map(l => LEVEL_COL.get(l)), label: "Isopleth"};
+  const titleH = 50, legendH = 40;
+  return html`<div class="plot-wrap">
+    <div class="plot-head"><div class="plot-title">Period: ${period}</div>
+      <div class="plot-subtitle">Dashed lines: all years combined</div></div>
+    ${Plot.plot({
+      width: w, height: Math.max(140, h - titleH - legendH),
+      marginLeft: 60, marginBottom: 36, marginRight: 15,
+      style: {fontSize: "11px"},
+      x: {type: "point", domain: years, label: "Year", labelAnchor: "center", labelArrow: "none",
+          padding: 0.3, grid: true},
+      y: {label: "Area (km²)", labelAnchor: "center", labelArrow: "none", grid: true, nice: true},
+      color,
+      marks: [
+        Plot.ruleY(allRows, {y: "area_km2", stroke: "isopleth", strokeDasharray: "5,4",
+                             strokeWidth: 0.8}),
+        Plot.line(sorted, {x: "year", y: "area_km2", z: "isopleth", stroke: "isopleth"}),
+        Plot.dot(sorted, {x: "year", y: "area_km2", fill: "isopleth", r: 2.5, tip: true,
+                          title: r => `${r.isopleth}\n${r.year}: ${fmtArea(r.area_km2)} km²`})
+      ]
+    })}
+    <div class="legend-row">${Plot.legend({color})}</div>
+  </div>`;
+}
+
+areaOverTime = herdData.rangeRows.filter(r =>
+  r.season === prPeriod && r.year !== ALL_YEARS && prLevels.includes(r.isopleth))
+
+areaAllYears = herdData.rangeRows.filter(r =>
+  r.season === prPeriod && r.year === ALL_YEARS && prLevels.includes(r.isopleth))
+
+// ============================================================================
+// Compare periods
+// ============================================================================
+
+cmpRows = herdData.rangeRows.filter(r => r.isopleth === cmpLevel)
+
+// Horizontal bars of `xField` by period, filled by range type
+function periodBars(rows, xField, xLabel, title, w, h) {
+  if (!rows.length) return emptyMsg("No ranges for this selection.");
+  const domain = periodChoices.filter(p => rows.some(r => r.season === p));
+  const color = typeColor(rows.map(r => r.type));
+  const titleH = 30, legendH = 40;
+  return html`<div class="plot-wrap">
+    <div class="plot-head"><div class="plot-title">${title}</div></div>
+    ${Plot.plot({
+      width: w, height: Math.max(140, h - titleH - legendH),
+      marginLeft: 130, marginBottom: 36, marginRight: 20,
+      style: {fontSize: "11px"},
+      x: {label: xLabel, labelAnchor: "center", labelArrow: "none", grid: true, nice: true},
+      y: {domain, label: null},
+      color,
+      marks: [
+        Plot.barX(rows, {y: "season", x: xField, fill: "type", tip: true,
+                         title: r => `${r.season}\n${xLabel}: ${xField === "weight"
+                           ? r.weight : fmtArea(r.area_km2)}`}),
+        Plot.ruleX([0])
+      ]
+    })}
+    <div class="legend-row">${Plot.legend({color})}</div>
+  </div>`;
+}
+
+// Small multiples of area by year, one panel per period (free y scales)
+function periodFacets(rows, level, w, h) {
+  const z = rows.filter(r => r.year !== ALL_YEARS);
+  if (!z.length) return emptyMsg("No yearly ranges for this level.");
+  const years = [...new Set(z.map(r => r.year))].sort(naturalSort);
+  const panels = periodChoices.filter(p => z.some(r => r.season === p));
+  const ncol = 2, nrow = Math.ceil(panels.length / ncol);
+  const titleH = 30, stripH = 18;
+  const pw = Math.floor((w - 8 * (ncol - 1)) / ncol);
+  const ph = Math.max(110, Math.floor((h - titleH) / nrow) - stripH - 8);
+  return html`<div class="plot-wrap">
+    <div class="plot-head"><div class="plot-title">Range area by year, ${level} isopleth</div></div>
+    <div class="facet-grid" style="grid-template-columns: repeat(${ncol}, ${pw}px); gap: 8px;">
+      ${panels.map(p => {
+        const d = d3.sort(z.filter(r => r.season === p), r => years.indexOf(r.year));
+        return html`<div class="facet"><div class="strip">${p}</div>${Plot.plot({
+          width: pw, height: ph, marginLeft: 55, marginBottom: 28, marginRight: 10,
+          style: {fontSize: "10px"},
+          x: {type: "point", domain: years, label: null, padding: 0.3, grid: true},
+          y: {label: "Area (km²)", labelAnchor: "center", labelArrow: "none", grid: true, nice: true},
+          marks: [
+            Plot.line(d, {x: "year", y: "area_km2"}),
+            Plot.dot(d, {x: "year", y: "area_km2", r: 2, fill: "black", tip: true,
+                         title: r => `${r.year}: ${fmtArea(r.area_km2)} km²`})
+          ]
+        })}</div>`;
+      })}
+    </div>
+  </div>`;
+}
+```
+
+# Population Ranges {orientation="columns" scrolling="true"}
+
+## Column {width=60%}
+
+```{ojs}
+//| title: Range distribution
+rangeMap.container
+```
+
+## Column {width=40%}
+
+### Row - one {height="25%"}
+
+```{ojs}
+//| title: Summary stats
+summaryText(herdData, rangeSubset, gps1, herdLabel, prYear, prPeriod)
+```
+
+### Row - two {height="25%"}
+
+```{ojs}
+//| title: Range area by level
+rangeTable(rangeSubset)
+```
+
+### Row - three {height="50%"}
+
+```{ojs}
+//| title: Range area over time
+fitToCard((w, h) => areaTimePlot(areaOverTime, areaAllYears, prPeriod, w, h), invalidation)
+```
+
+# Compare periods
+
+## Column {width=50%}
+
+```{ojs}
+//| title: Range area by period (selected year)
+fitToCard((w, h) => periodBars(cmpRows.filter(r => r.year === prYear), "area_km2", "Area (km²)",
+                               `${prYear}, ${cmpLevel} isopleth`, w, h), invalidation)
+```
+
+```{ojs}
+//| title: Period weights
+fitToCard((w, h) => periodBars(
+  cmpRows.filter(r => r.year === ALL_YEARS && (r.type === "season" || r.type === "migration")),
+  "weight", "Weight", "Share of the year used to weight each period", w, h), invalidation)
+```
+
+## Column {width=50%}
+
+```{ojs}
+//| title: Range area over time by period
+fitToCard((w, h) => periodFacets(cmpRows, cmpLevel, w, h), invalidation)
+```
+
+# About {orientation="columns" scrolling="true"}
+
+## Column {width=50%}
+
+::: {.card title="About this app" .about-card}
+This dashboard shows **population-level ranges** for three LFN caribou herds: **Little Rancheria**, **Wolf Lake** and **Horse Ranch**. Ranges are estimated from GPS collar relocations and are shown for all years combined and for each year separately.
+
+For each herd and year the app provides:
+
+- an **annual range**, built from the seasonal and migration-period ranges, weighted by the share of the year each period covers;
+- a **range for each season and migration period** (e.g. winter, calving, spring migration);
+- a **seasonal union**, the combined footprint of all the seasonal and migration ranges.
+
+Each range is drawn at four isopleth levels, **95%, 99%, 99.9% and 99.99%**: the smallest area expected to contain that share of the herd's use. The higher levels capture rarely used areas at the edge of the range.
+
+The ranges are produced by the R script `pop_range.R`, which writes `output/<herd>/pop_ranges.geojson` and `output/<herd>/gps.csv`. The app reads those files; it does not run any analysis itself.
+:::
+
+::: {.card title="Methods" .about-card}
+**Data preparation.** GPS relocations are assigned to a season or, between seasons, to a migration period (e.g. "spring migration"); each migration is treated as a period of its own. Fixes with neither label are dropped. Coordinates are projected to NAD83 / Yukon Albers (EPSG:3578) so that areas are in true km².
+
+**Individual utilization distributions (UDs).** For each animal and period, a kernel density estimate (KDE; `amt::hr_kde`, reference bandwidth) is fitted on a common 500 m grid shared by all animals, periods and years, padded so the outer tails are not cut off. Animal-periods with fewer than **30 fixes** are left out. Each UD is scaled to sum to 1.
+
+**Period population UDs.** The individual UDs for a period are averaged cell by cell, so **each animal counts equally**, however many fixes it has.
+
+**Annual population UD.** The annual UD is a weighted mixture of the period UDs. Each period's weight is its share of the year, from the number of distinct calendar days with data in that period, across all years. The same weights are used for every year so that gaps in collar coverage don't distort individual years. When a year has no data for a period, the remaining weights are rescaled to sum to 1. The weights are shown in the *Period weights* plot.
+
+**Isopleths.** An isopleth at level *p* is the set of grid cells with the highest UD values whose total reaches *p*. These cells are turned into polygons, and their area is reported in km².
+
+**Seasonal union.** At each level, the seasonal and migration-period isopleths are merged into one polygon. It shows the overall extent of use, but it is not a UD and is not weighted by time.
+
+**Boundary.** The black outline on the map is the seasonal union at the 99.99% level, all years combined.
+
+**Limitations.** Range estimates depend on the number of collared animals and on the KDE bandwidth. Years or periods with few animals (see *Animals* in the summary) are less reliable, and the 99.9% and 99.99% isopleths are sensitive to a small number of outlying fixes.
+:::
+
+## Column {width=50%}
+
+::: {.card title="How to use" .about-card}
+**Sidebar controls** (apply to every page)
+
+- **Herd**: the herd to display.
+- **Year**: *All years* or a single year.
+- **Period**: *Annual (weighted)*, a single season or migration period, or the *Seasonal union*.
+- **Isopleth levels**: the levels to draw on the map and in the area plot.
+- **Opacity**: fill transparency of the range polygons.
+- **Point size**: size of the GPS points on the map.
+- **Comparison level**: the isopleth level used on the *Compare periods* page.
+
+**Population Ranges page**
+
+- **Range distribution**: map of the selected ranges. Use the layer control (top right) to change the basemap and to show or hide the *Boundary*, *Ranges* and *GPS* layers (GPS points are hidden at first). Hover over a range to see its area.
+- **Summary stats**: herd, year and period, number of animals, date span and number of GPS relocations for the selection. For a single period it also shows the period type and its weight in the annual range.
+- **Range area by level**: area (km²) of each isopleth for the selected year and period.
+- **Range area over time**: area by year for the selected period, one line per isopleth. Dashed lines show the all-years estimate.
+
+**Compare periods page**
+
+- **Range area by period**: area of each period's range for the selected year, at the comparison level.
+- **Period weights**: share of the year given to each season and migration period in the annual range.
+- **Range area over time by period**: one small plot per period showing area by year; each plot has its own y-axis scale.
+
+**Tips**
+
+- Click the expand icon in the bottom-right corner of a card to view it full screen.
+- Hover over points and bars in the plots to see their values.
+- To view GPS points for one season, choose that period and tick *GPS* in the map's layer control.
+:::
